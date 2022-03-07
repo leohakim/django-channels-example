@@ -2,6 +2,8 @@ import json
 
 from asgiref.sync import async_to_sync
 from channels.generic.websocket import WebsocketConsumer
+from django.contrib.auth.models import User
+from django.contrib.auth import authenticate, login
 
 from .models import Room, Message
 
@@ -21,9 +23,12 @@ class ChatConsumer(WebsocketConsumer):
         self.room_group_name = f'chat_{self.room_name}'
         self.room = Room.objects.get(name=self.room_name)
         self.user = self.scope['user']
+        print(dir(self.scope['session']))
+        print(self.scope['session'].session_key)
+        self.session_id = self.scope['cookies']['sessionid']
         self.user_inbox = f'inbox_{self.user.username}'
 
-        # connection has to be accepted
+        # connection has to be acted
         self.accept()
 
         # join the room group
@@ -38,21 +43,27 @@ class ChatConsumer(WebsocketConsumer):
             'users': [user.username for user in self.room.online.all()],
         }))
 
-        if self.user.is_authenticated:
-            # create a User inbox for private messages
-            async_to_sync(self.channel_layer.group_add)(
-                self.user_inbox,
-                self.channel_name,
+        if not self.user.is_authenticated:
+            self.user, created = User.objects.get_or_create(
+                username=self.session_id
             )
-            # send the join event to the room
-            async_to_sync(self.channel_layer.group_send)(
-                self.room_group_name,
-                {
-                    'type': 'user_join',
-                    'user': self.user.username,
-                }
-            )
-            self.room.online.add(self.user)
+            if created:
+                self.user.set_unusable_password()
+                self.user.save()
+            authenticate(self.user)
+        async_to_sync(self.channel_layer.group_add)(
+            self.user_inbox,
+            self.channel_name,
+        )
+        # send the join event to the room
+        async_to_sync(self.channel_layer.group_send)(
+            self.room_group_name,
+            {
+                'type': 'user_join',
+                'user': self.user.username,
+            }
+        )
+        self.room.online.add(self.user)
 
     def disconnect(self, close_code):
         async_to_sync(self.channel_layer.group_discard)(
@@ -60,21 +71,21 @@ class ChatConsumer(WebsocketConsumer):
             self.channel_name,
         )
 
-        if self.user.is_authenticated:
+        # if self.user.is_authenticated:
             # delete the User inbox for private messages
-            async_to_sync(self.channel_layer.group_discard)(
-                self.user_inbox,
-                self.channel_name,
-            )
-            # Send the leave event to the room
-            async_to_sync(self.channel_layer.group_send)(
-                self.room_group_name,
-                {
-                    'type': 'user_leave',
-                    'user': self.user.username,
-                }
-            )
-            self.room.online.remove(self.user)
+        async_to_sync(self.channel_layer.group_discard)(
+            self.user_inbox,
+            self.channel_name,
+        )
+        # Send the leave event to the room
+        async_to_sync(self.channel_layer.group_send)(
+            self.room_group_name,
+            {
+                'type': 'user_leave',
+                'user': self.user.username,
+            }
+        )
+        self.room.online.remove(self.user)
 
     def receive(self, text_data=None, bytes_data=None):
         text_data_json = json.loads(text_data)
